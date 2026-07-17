@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import './App.css';
 import { useGeofence, type Coordinates } from './lib/geo-fencing';
 
@@ -9,7 +10,8 @@ const STORE_COORDINATES: Coordinates = {
 const RADIUS = 100; // in meters
 
 function App() {
-  const geofenceResult = useGeofence(STORE_COORDINATES, RADIUS);
+  const [radius, setRadius] = useState(RADIUS);
+  const geofenceResult = useGeofence(STORE_COORDINATES, radius);
 
   return (
     <main>
@@ -19,7 +21,20 @@ function App() {
         </p>
         <p>Lat: {STORE_COORDINATES.latitude}</p>
         <p>Lat: {STORE_COORDINATES.longitude}</p>
-        <p>Required Radius: {RADIUS}m</p>
+        <div>
+          <label htmlFor="radius" style={{ display: 'block' }}>
+            Required Radius: {radius}m
+          </label>
+          <input
+            type="range"
+            name="radius"
+            step={10}
+            min={0}
+            max={100}
+            value={radius}
+            onChange={(e) => setRadius(e.currentTarget.valueAsNumber)}
+          />
+        </div>
       </div>
       <hr />
       {geofenceResult.loading ? (
@@ -51,7 +66,7 @@ function App() {
       <button
         type="button"
         disabled={geofenceResult.loading}
-        onClick={() => window.location.reload()}
+        onClick={geofenceResult.refresh}
       >
         Refresh
       </button>

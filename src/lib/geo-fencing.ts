@@ -274,8 +274,6 @@ type UseGeofenceResult = {
 
   country?: string;
 
-  effectiveRadius: number;
-
   isWithinRadius: boolean | null;
 
   canClockIn: boolean;
@@ -362,27 +360,11 @@ export function useGeofence(
    * No additional React state is needed.
    */
 
-  const distance = useMemo(() => {
-    if (!state.current) {
-      return null;
-    }
+  const distance = state.current
+    ? distanceBetween(state.current.location, center)
+    : 0;
 
-    return distanceBetween(state.current.location, center);
-  }, [center, state.current?.location, state]);
-
-  const effectiveRadius = useMemo(() => {
-    const accuracy = state.current?.accuracy ?? 0;
-
-    return radiusMeters + Math.min(accuracy, 30);
-  }, [radiusMeters, state]);
-
-  const isWithinRadius = useMemo(() => {
-    if (distance == null) {
-      return null;
-    }
-
-    return distance <= effectiveRadius;
-  }, [distance, effectiveRadius]);
+  const isWithinRadius = distance <= radiusMeters;
 
   /**
    * Example rule for clock in.
@@ -419,8 +401,6 @@ export function useGeofence(
     city: state.current?.city,
 
     country: state.current?.country,
-
-    effectiveRadius,
 
     isWithinRadius,
 
