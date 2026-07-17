@@ -2,11 +2,11 @@ import './App.css';
 import { useGeofence, type Coordinates } from './lib/geo-fencing';
 
 const STORE_COORDINATES: Coordinates = {
-  latitude: 14.4920901,
-  longitude: 121.215376,
+  latitude: 14.4921251,
+  longitude: 121.218275,
 };
 
-const RADIUS = 350; // in meters
+const RADIUS = 100; // in meters
 
 function App() {
   const geofenceResult = useGeofence(STORE_COORDINATES, RADIUS);
