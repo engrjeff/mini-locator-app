@@ -1,16 +1,29 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+
+/* -------------------------------------------------------------------------- */
+/*                                   Types                                    */
+/* -------------------------------------------------------------------------- */
 
 export type Coordinates = {
   latitude: number;
   longitude: number;
 };
 
+export type GpsQuality = 'excellent' | 'good' | 'fair' | 'poor';
+
 export type CurrentLocation = {
   location: Coordinates;
   accuracy: number | null;
+  quality: GpsQuality;
   source: 'gps' | 'ip';
   city?: string;
   country?: string;
+};
+
+export type GetCurrentLocationOptions = {
+  targetAccuracy?: number;
+  timeout?: number;
+  fallbackToIp?: boolean;
 };
 
 export interface IpWhoIsResponse {
@@ -61,6 +74,16 @@ export interface IpWhoIsResponse {
   };
 }
 
+type LocationState = {
+  loading: boolean;
+  error: Error | null;
+  current: CurrentLocation | null;
+};
+
+/* -------------------------------------------------------------------------- */
+/*                                  Helpers                                   */
+/* -------------------------------------------------------------------------- */
+
 /**
  * Returns the distance in meters between two coordinates.
  */
@@ -82,6 +105,22 @@ export function distanceBetween(a: Coordinates, b: Coordinates): number {
   return 2 * R * Math.atan2(Math.sqrt(hav), Math.sqrt(1 - hav));
 }
 
+function getGpsQuality(accuracy: number | null): GpsQuality {
+  if (accuracy == null) return 'poor';
+
+  if (accuracy <= 10) return 'excellent';
+
+  if (accuracy <= 20) return 'good';
+
+  if (accuracy <= 50) return 'fair';
+
+  return 'poor';
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              IP Location Fallback                          */
+/* -------------------------------------------------------------------------- */
+
 async function getLocationFromIp(): Promise<CurrentLocation> {
   const response = await fetch('https://ipwho.is/');
 
@@ -98,8 +137,11 @@ async function getLocationFromIp(): Promise<CurrentLocation> {
   return {
     source: 'ip',
     accuracy: null,
+    quality: 'poor',
+
     city: data.city,
     country: data.country,
+
     location: {
       latitude: data.latitude,
       longitude: data.longitude,
@@ -107,163 +149,319 @@ async function getLocationFromIp(): Promise<CurrentLocation> {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/*                             GPS (Best Location)                            */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Gets the user's current location.
+ * Uses watchPosition instead of getCurrentPosition.
  *
- * Attempts GPS first.
- * Falls back to IP geolocation if GPS permission is denied,
- * unavailable, or times out.
+ * Waits until:
+ *
+ * - desired accuracy is achieved
+ * OR
+ * - timeout expires
+ *
+ * Returns the best reading collected.
  */
-export async function getCurrentLocation(): Promise<CurrentLocation> {
+export async function getCurrentLocation(
+  options: GetCurrentLocationOptions = {},
+): Promise<CurrentLocation> {
+  const { targetAccuracy = 20, timeout = 5000, fallbackToIp = true } = options;
+
   if (!navigator.geolocation) {
-    return getLocationFromIp();
+    if (fallbackToIp) {
+      return getLocationFromIp();
+    }
+
+    throw new Error('Geolocation is not supported.');
   }
 
   try {
     const position = await new Promise<GeolocationPosition>(
       (resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0,
-        });
+        let bestPosition: GeolocationPosition | null = null;
+
+        let finished = false;
+
+        const finish = (position?: GeolocationPosition, error?: Error) => {
+          if (finished) return;
+
+          finished = true;
+
+          navigator.geolocation.clearWatch(watchId);
+
+          if (position) {
+            resolve(position);
+          } else {
+            reject(error ?? new Error('Unable to determine location.'));
+          }
+        };
+
+        const watchId = navigator.geolocation.watchPosition(
+          (position) => {
+            if (
+              !bestPosition ||
+              position.coords.accuracy < bestPosition.coords.accuracy
+            ) {
+              bestPosition = position;
+            }
+
+            if (position.coords.accuracy <= targetAccuracy) {
+              finish(position);
+            }
+          },
+          (error) => {
+            finish(undefined, new Error(error.message));
+          },
+          {
+            enableHighAccuracy: true,
+            maximumAge: 0,
+            timeout,
+          },
+        );
+
+        setTimeout(() => {
+          if (bestPosition) {
+            finish(bestPosition);
+          } else {
+            finish(undefined, new Error('Timed out getting location.'));
+          }
+        }, timeout);
       },
     );
 
     return {
       source: 'gps',
+
       accuracy: position.coords.accuracy,
+
+      quality: getGpsQuality(position.coords.accuracy),
+
       location: {
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
       },
     };
-  } catch {
+  } catch (err) {
+    if (!fallbackToIp) {
+      throw err;
+    }
+
     return getLocationFromIp();
   }
 }
 
-/**
- * Returns geofence information.
- */
-export async function checkGeofence(center: Coordinates, radiusMeters: number) {
-  const current = await getCurrentLocation();
-
-  const distance = distanceBetween(current.location, center);
-
-  return {
-    inside: distance <= radiusMeters + (current.accuracy ?? 0),
-
-    distance,
-    ...current,
-  };
-}
-
-/**
- * Returns whether the user is within the specified radius.
- */
-export async function isUserWithinRadius(
-  center: Coordinates,
-  radiusMeters: number,
-): Promise<boolean> {
-  const result = await checkGeofence(center, radiusMeters);
-
-  return result.inside;
-}
+/* -------------------------------------------------------------------------- */
+/*                               React Hook State                             */
+/* -------------------------------------------------------------------------- */
 
 type UseGeofenceResult = {
-  isWithinRadius: boolean | null;
-  distance: number | null;
-  accuracy: number | null;
-  source: 'gps' | 'ip' | null;
-  city?: string;
-  country?: string;
   loading: boolean;
   error: Error | null;
+
   location?: Coordinates;
+
+  distance: number | null;
+
+  accuracy: number | null;
+
+  quality: GpsQuality | null;
+
+  source: 'gps' | 'ip' | null;
+
+  city?: string;
+
+  country?: string;
+
+  effectiveRadius: number;
+
+  isWithinRadius: boolean | null;
+
+  canClockIn: boolean;
+
+  refresh: () => Promise<void>;
 };
 
-/**
- * React hook for geofencing.
- *
- * - Uses GPS when available.
- * - Falls back to IP location automatically.
- * - Recalculates when the radius changes.
- * - Polls every 30 seconds.
- */
+/* -------------------------------------------------------------------------- */
+/*                               useGeofence Hook                             */
+/* -------------------------------------------------------------------------- */
+
 export function useGeofence(
   center: Coordinates,
   radiusMeters: number,
 ): UseGeofenceResult {
-  const [distance, setDistance] = useState<number | null>(null);
+  const [state, setState] = useState<LocationState>({
+    loading: true,
+    error: null,
+    current: null,
+  });
 
-  const [accuracy, setAccuracy] = useState<number | null>(null);
+  const refresh = useCallback(async () => {
+    setState((prev) => ({
+      ...prev,
+      loading: true,
+      error: null,
+    }));
 
-  const [source, setSource] = useState<'gps' | 'ip' | null>(null);
+    try {
+      const current = await getCurrentLocation({
+        targetAccuracy: 20,
+        timeout: 5000,
+      });
 
-  const [city, setCity] = useState<string>();
-  const [country, setCountry] = useState<string>();
-  const [userLocation, setUserLocation] = useState<Coordinates>();
-
-  const [loading, setLoading] = useState(true);
-
-  const [error, setError] = useState<Error | null>(null);
+      setState({
+        loading: false,
+        error: null,
+        current,
+      });
+    } catch (err) {
+      setState({
+        loading: false,
+        error: err as Error,
+        current: null,
+      });
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    let mounted = true;
 
-    async function updateLocation() {
+    (async () => {
       try {
-        setLoading(true);
+        const current = await getCurrentLocation({
+          targetAccuracy: 20,
+          timeout: 5000,
+        });
 
-        const current = await getCurrentLocation();
+        if (!mounted) return;
 
-        if (cancelled) return;
-
-        setDistance(distanceBetween(current.location, center));
-
-        setAccuracy(current.accuracy);
-        setSource(current.source);
-        setCity(current.city);
-        setCountry(current.country);
-        setUserLocation(current.location);
-
-        setError(null);
+        setState({
+          loading: false,
+          error: null,
+          current,
+        });
       } catch (err) {
-        if (!cancelled) {
-          setError(err as Error);
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    }
+        if (!mounted) return;
 
-    updateLocation();
+        setState({
+          loading: false,
+          error: err as Error,
+          current: null,
+        });
+      }
+    })();
 
     return () => {
-      cancelled = true;
+      mounted = false;
     };
-  }, [center]);
+  }, []);
+
+  /**
+   * Everything below is derived state.
+   * No additional React state is needed.
+   */
+
+  const distance = useMemo(() => {
+    if (!state.current) {
+      return null;
+    }
+
+    return distanceBetween(state.current.location, center);
+  }, [center, state.current?.location, state]);
+
+  const effectiveRadius = useMemo(() => {
+    const accuracy = state.current?.accuracy ?? 0;
+
+    return radiusMeters + Math.min(accuracy, 30);
+  }, [radiusMeters, state]);
 
   const isWithinRadius = useMemo(() => {
     if (distance == null) {
       return null;
     }
 
-    return distance <= radiusMeters + (accuracy ?? 0);
-  }, [distance, accuracy, radiusMeters]);
+    return distance <= effectiveRadius;
+  }, [distance, effectiveRadius]);
+
+  /**
+   * Example rule for clock in.
+   *
+   * Feel free to make this stricter later.
+   */
+  const canClockIn = useMemo(() => {
+    if (!state.current) {
+      return false;
+    }
+
+    return (
+      isWithinRadius === true &&
+      state.current.source === 'gps' &&
+      state.current.quality !== 'poor'
+    );
+  }, [state, isWithinRadius]);
 
   return {
-    isWithinRadius,
+    loading: state.loading,
+
+    error: state.error,
+
+    location: state.current?.location,
+
     distance,
-    accuracy,
-    source,
-    city,
-    country,
-    loading,
-    error,
-    location: userLocation,
+
+    accuracy: state.current?.accuracy ?? null,
+
+    quality: state.current?.quality ?? null,
+
+    source: state.current?.source ?? null,
+
+    city: state.current?.city,
+
+    country: state.current?.country,
+
+    effectiveRadius,
+
+    isWithinRadius,
+
+    canClockIn,
+
+    refresh,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/*                            Utility Functions                               */
+/* -------------------------------------------------------------------------- */
+
+export async function checkGeofence(center: Coordinates, radiusMeters: number) {
+  const current = await getCurrentLocation();
+
+  const distance = distanceBetween(current.location, center);
+
+  const effectiveRadius = radiusMeters + Math.min(current.accuracy ?? 0, 30);
+
+  return {
+    inside: distance <= effectiveRadius,
+
+    distance,
+
+    effectiveRadius,
+
+    canClockIn:
+      distance <= effectiveRadius &&
+      current.source === 'gps' &&
+      current.quality !== 'poor',
+
+    ...current,
+  };
+}
+
+export async function isUserWithinRadius(
+  center: Coordinates,
+  radiusMeters: number,
+) {
+  const result = await checkGeofence(center, radiusMeters);
+
+  return result.inside;
 }
